@@ -146,7 +146,7 @@ def send_to_pvoutput(api_key: str, system_id: str, watts: int,
     if avg_temp is not None:
         data["v5"] = round(avg_temp)
     if avg_volt is not None:
-        data["v6"] = f"{avg_volt:.1f}"  # typical formatting for v6
+        data["v6"] = "{avg_volt, 1}"
     r = requests.post("https://pvoutput.org/service/r2/addstatus.jsp",
                       headers=headers, data=data, timeout=10)
     r.raise_for_status()
