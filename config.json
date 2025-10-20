@@ -1,6 +1,8 @@
 {
   "host": "1.2.3.4",
   "path": "/cgi-bin/parameters",
+  "expected_count": 20,
+  "scale_missing": "yes",
   "pvoutput": {
     "publish": "yes",
     "api_key": "YOUR_API_KEY",

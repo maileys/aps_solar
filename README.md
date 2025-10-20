@@ -2,7 +2,8 @@
 
 A lightweight Python utility for reading live data from an **Altenergy Power System (APS / APsystems)** microinverter gateway and optionally publishing total generation to [PVOutput.org](https://pvoutput.org).
 
-This script replaces older versions (`aps_read.py`, `aps_read_publish_pvoutput.py`) with a **single unified tool** for both reading and publishing.
+This script automatically fetches power data from your APS ECU web interface and can optionally publish it to PVOutput.  
+It also includes logic to handle communication dropouts by estimating total output when some inverters don’t report.
 
 ---
 
@@ -10,15 +11,15 @@ This script replaces older versions (`aps_read.py`, `aps_read_publish_pvoutput.p
 
 | File | Description |
 |------|--------------|
-| **`aps_solar.py`** | Reads power data from the APS web interface and, if configured, publishes it to PVOutput.org. |
-| **`config.json`** | Configuration file specifying gateway and PVOutput settings. |
+| **`aps_solar.py`** | Reads APS inverter data and, if configured, publishes to PVOutput. Includes optional scaling when panels are missing. |
+| **`config.json`** | Configuration file specifying gateway, PVOutput, and scaling settings. |
 
 ---
 
 ## ⚙️ Configuration
 
 `aps_solar.py` uses a simple JSON configuration file.  
-If the `publish` flag (inside `pvoutput`) is `"yes"`, data will be pushed to PVOutput — otherwise it’s just printed or returned as JSON.
+If `"pvoutput.publish"` is `"yes"`, it will push results to PVOutput — otherwise it will just display or return them in JSON.
 
 ### Example `config.json`
 
@@ -26,6 +27,8 @@ If the `publish` flag (inside `pvoutput`) is `"yes"`, data will be pushed to PVO
 {
   "host": "192.168.1.102",
   "path": "/cgi-bin/parameters",
+  "scale_missing": "yes",
+  "expected_count": 20,
   "pvoutput": {
     "publish": "yes",
     "api_key": "YOUR_API_KEY",
@@ -40,65 +43,64 @@ If the `publish` flag (inside `pvoutput`) is `"yes"`, data will be pushed to PVO
 
 | Key | Description | Required | Default |
 |-----|-------------|----------|---------|
-| `host` | IP or hostname of the APS ECU / gateway | ✅ | — |
-| `path` | Path to inverter data page | ❌ | `/cgi-bin/parameters` |
-| `pvoutput.publish` | `"yes"` to publish to PVOutput; otherwise just print results | ❌ | `"no"` |
-| `pvoutput.api_key` | PVOutput API key | Only if publishing | — |
-| `pvoutput.system_id` | PVOutput system ID | Only if publishing | — |
+| `host` | IP or hostname of the APS ECU/gateway | ✅ | — |
+| `path` | Path to the inverter data page | ❌ | `/cgi-bin/parameters` |
+| `scale_missing` | `"yes"` to estimate total if some inverters don’t report | ❌ | `"no"` |
+| `expected_count` | Expected number of inverter/panel readings (only required if scaling is enabled) | ⚠️ | — |
+| `pvoutput.publish` | `"yes"` to publish data to PVOutput | ❌ | `"no"` |
+| `pvoutput.api_key` | Your PVOutput API key | Required if publishing | — |
+| `pvoutput.system_id` | Your PVOutput system ID | Required if publishing | — |
 | `pvoutput.send_voltage_v6` | Include average voltage in upload (`v6`) | ❌ | `true` |
 | `pvoutput.send_temp_v5` | Include average temperature in upload (`v5`) | ❌ | `true` |
-
-> 💡 If `"publish"` is missing or set to `"no"`, readings are displayed locally and **not** uploaded to PVOutput.
-
-Save this file as `config.json` in the same folder as the script (or specify another path with `--config`).
 
 ---
 
 ## 🧩 Requirements
 
-Only one external library is required:
+This script depends only on one external library:
 
 ```bash
 pip install requests
 ```
 
-All other functionality uses Python’s standard library (`html.parser`, `re`, `json`, etc.).  
-Tested on **Python 3.7+**.
+Everything else uses the Python standard library (`html.parser`, `json`, `re`, `datetime`, etc.).  
+Tested with **Python 3.7+**.
 
 ---
 
 ## 🖥️ Usage
 
-### Basic usage
+### Read inverter data only
 ```bash
 python aps_solar.py --config config.json
 ```
 
-### JSON output
+### Output as JSON
 ```bash
 python aps_solar.py --config config.json --json
 ```
 
 ---
 
-## 🧾 Example Outputs
+## ⚙️ How Scaling Works
 
-### Console Output (Publish = yes)
-```text
-Data source: http://192.168.1.102/cgi-bin/parameters
+If some inverters fail to report, and `scale_missing` is `"yes"`,  
+the script estimates total output as:
 
-  INV-XXXX-A: 2 W
-  INV-XXXX-B: 1 W
-  INV-YYYY-A: 2 W
-  INV-YYYY-B: 2 W
-
-Total power: 7 W
-Avg voltage: 229 V
-Avg temp: 21 °C
-PVOutput response: OK 200
+```
+estimated_total = round((total_raw / received_count) * expected_count)
 ```
 
-### Console Output (Publish = no)
+This ensures continuity of total readings during brief communication losses.  
+Scaling only occurs if:
+- `scale_missing` = `"yes"`, **and**
+- `expected_count` is defined and greater than the number of readings received.
+
+---
+
+## 🧾 Example Outputs
+
+### Case 1 – All panels reporting
 ```text
 Data source: http://192.168.1.102/cgi-bin/parameters
 
@@ -107,26 +109,49 @@ Data source: http://192.168.1.102/cgi-bin/parameters
   INV-YYYY-A: 2 W
   INV-YYYY-B: 2 W
 
+Received panels: 4
+Raw total power: 7 W
 Total power: 7 W
-Avg voltage: 229 V
-Avg temp: 21 °C
+Avg voltage: 229.0 V
+Avg temp: 21.0 °C
 Publishing skipped (pvoutput.publish=no).
+```
+
+### Case 2 – Some panels missing, scaling enabled
+```text
+Data source: http://192.168.1.102/cgi-bin/parameters
+
+  INV-XXXX-A: 2 W
+  INV-XXXX-B: 1 W
+  INV-YYYY-A: 2 W
+  INV-YYYY-B: — W
+
+Received panels: 3 / expected 4
+Raw total power: 5 W
+Estimated total (scaled for missing panels): 7 W
+Avg voltage: 229.0 V
+Avg temp: 21.0 °C
+PVOutput response: OK 200
 ```
 
 ### JSON Output Example
 ```json
 {
   "source": "http://192.168.1.102/cgi-bin/parameters",
-  "timestamp": "2025-10-20T15:38:22",
-  "total_watts": 7,
-  "avg_temp_c": 21,
-  "avg_volt_v": 229,
+  "timestamp": "2025-10-20T16:04:25",
+  "received_count": 18,
+  "expected_count": 20,
+  "total_watts_raw": 630,
+  "total_watts_estimated": 700,
+  "total_watts_for_output": 700,
+  "avg_volt_v": 229.0,
+  "avg_temp_c": 21.0,
   "panels": {
     "INV-XXXX-A": 2,
     "INV-XXXX-B": 1,
-    "INV-YYYY-A": 2,
-    "INV-YYYY-B": 2
-  }
+    "INV-YYYY-A": 2
+  },
+  "scaled_due_to_missing": true
 }
 ```
 
@@ -134,30 +159,29 @@ Publishing skipped (pvoutput.publish=no).
 
 ## ☀️ PVOutput Publishing
 
-If `"pvoutput.publish": "yes"`, the script automatically posts the current total power and optional average voltage/temperature to PVOutput.org using your API key and system ID.
+When `"pvoutput.publish": "yes"`, the script posts results to:
 
-Endpoint used:
 ```
 https://pvoutput.org/service/r2/addstatus.jsp
 ```
 
-Data fields sent:
-- `v2` = Instantaneous Power (W)
-- `v5` = Temperature (°C) *(optional)*
-- `v6` = Voltage (V) *(optional)*
+Data sent:
+| Field | Description |
+|--------|-------------|
+| `v2` | Instantaneous Power (W) |
+| `v5` | Temperature (°C) *(optional)* |
+| `v6` | Voltage (V) *(optional)* |
 
-A typical PVOutput success response is:
+A typical success response from PVOutput is:
 ```
 OK 200
 ```
 
 ---
 
-## 🕒 Scheduling (optional)
+## 🕒 Scheduling Example (Linux)
 
-You can schedule this script to run automatically using cron or Task Scheduler.
-
-Example — run every 5 minutes and append to a log file:
+Run every 5 minutes and log output:
 ```bash
 */5 * * * * /usr/bin/env bash -lc 'python /home/pi/aps_solar.py --config /home/pi/config.json >>/home/pi/aps_solar.log 2>&1'
 ```
@@ -172,7 +196,9 @@ Released under the **MIT License** — free to use, modify, and distribute with 
 
 ## 🙋‍♂️ Credits
 
-Developed for personal solar monitoring with **Altenergy Power System (APsystems)** microinverters and **PVOutput.org** integration.
+Developed for personal solar monitoring using  
+**Altenergy Power System (APsystems)** microinverters  
+with optional **PVOutput.org** integration.
 
 ---
 
@@ -183,8 +209,9 @@ Developed for personal solar monitoring with **Altenergy Power System (APsystems
 | Reads inverter data | ✅ |
 | Prints per-panel watts | ✅ |
 | Calculates total watts | ✅ |
+| Estimates missing panels | ✅ (optional) |
 | JSON output option | ✅ |
-| PVOutput publishing | ✅ (if `"pvoutput.publish":"yes"`) |
+| PVOutput publishing | ✅ |
 | Simple config file | ✅ |
 | No heavy dependencies | ✅ |
 
