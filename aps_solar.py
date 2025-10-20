@@ -5,7 +5,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from html.parser import HTMLParser
@@ -18,10 +18,10 @@ DEFAULT_PATH = "/cgi-bin/parameters"
 TIMEOUT = 5.0
 DEFAULT_CONFIG_FILE = "config.json"
 
-# Regex helpers
-NUM_RE = re.compile(r"(\d+(?:\.\d+)?)")
-WATT_RE = re.compile(r"(\d+)\s*W\b", re.IGNORECASE)
-VOLT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*V\b", re.IGNORECASE)
+# Regex helpers (strict, unit-specific)
+WATT_RE = re.compile(r"(-?\d+)\s*W\b", re.IGNORECASE)
+VOLT_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*V\b", re.IGNORECASE)
+TEMP_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*°?\s*C\b", re.IGNORECASE)
 
 # ======================================
 # Config handling
@@ -86,19 +86,29 @@ def find_inverter_table(tables: List[List[List[str]]]) -> Optional[List[List[str
             return tbl
     return None
 
-def extract_first_int(text: str) -> Optional[int]:
+def extract_watts(text: str) -> Optional[int]:
+    """
+    Extract integer watts from text strictly matching '<num> W'.
+    Returns None if no watt pattern is found.
+    """
     m = WATT_RE.search(text)
-    if m:
-        return int(m.group(1))
-    m2 = re.search(r"(\d+)", text)
-    return int(m2.group(1)) if m2 else None
+    return int(m.group(1)) if m else None
 
-def extract_first_float(text: str) -> Optional[float]:
+def extract_volts(text: str) -> Optional[float]:
+    """
+    Extract float volts from text strictly matching '<num> V'.
+    Returns None if no volt pattern is found.
+    """
     m = VOLT_RE.search(text)
-    if m:
-        return float(m.group(1))
-    m2 = NUM_RE.search(text)
-    return float(m2.group(1)) if m2 else None
+    return float(m.group(1)) if m else None
+
+def extract_temp(text: str) -> Optional[float]:
+    """
+    Extract float temperature in °C from text strictly matching '<num> °C'.
+    Returns None if no temperature pattern is found.
+    """
+    m = TEMP_RE.search(text)
+    return float(m.group(1)) if m else None
 
 def parse_inverter_data(html: str) -> List[Dict]:
     parser = SimpleTableParser()
@@ -112,9 +122,9 @@ def parse_inverter_data(html: str) -> List[Dict]:
         if len(r) < 2:
             continue
         inv = r[0].strip()
-        watts = extract_first_int(r[1])
-        volt = extract_first_float(r[3]) if len(r) > 3 else None
-        temp = extract_first_float(r[4]) if len(r) > 4 else None
+        watts = extract_watts(r[1])
+        volt = extract_volts(r[3]) if len(r) > 3 else None
+        temp = extract_temp(r[4]) if len(r) > 4 else None
         results.append({"id": inv, "watts": watts, "volt": volt, "temp": temp})
     return results
 
@@ -136,7 +146,7 @@ def send_to_pvoutput(api_key: str, system_id: str, watts: int,
     if avg_temp is not None:
         data["v5"] = round(avg_temp)
     if avg_volt is not None:
-        data["v6"] = f"{avg_volt:.1f}"  # v6 commonly one decimal place
+        data["v6"] = f"{avg_volt:.1f}"  # typical formatting for v6
     r = requests.post("https://pvoutput.org/service/r2/addstatus.jsp",
                       headers=headers, data=data, timeout=10)
     r.raise_for_status()
@@ -149,10 +159,12 @@ def average(values: List[Optional[float]]) -> Optional[float]:
     nums = [v for v in values if isinstance(v, (int, float))]
     return (sum(nums) / len(nums)) if nums else None
 
-def scale_total_if_missing(total_raw: int,
-                           received_count: int,
-                           expected_count: Optional[int],
-                           scale_missing: bool) -> (int, Optional[int]):
+def scale_total_if_missing(
+    total_raw: int,
+    received_count: int,
+    expected_count: Optional[int],
+    scale_missing: bool
+) -> Tuple[int, Optional[int]]:
     """
     Returns (chosen_total, estimated_total_or_none).
     If scaling is enabled and we received fewer than expected (but >0),
@@ -195,7 +207,7 @@ def main():
     pv_cfg = cfg.get("pvoutput", {})
     publish = str(pv_cfg.get("publish", "no")).lower() in ("yes", "true", "1")
 
-    # Scaling flags:
+    # Scaling logic
     # - scale_missing defaults to "no" when not provided
     # - expected_count is only required if scale_missing is enabled
     scale_missing = str(cfg.get("scale_missing", "no")).lower() in ("yes", "true", "1")
@@ -249,7 +261,8 @@ def main():
     else:
         print(f"Data source: {url}\n")
         for r in readings:
-            print(f"  {r['id']}: {r['watts'] if r['watts'] is not None else '—'} W")
+            watts_display = r['watts'] if r['watts'] is not None else '—'
+            print(f"  {r['id']}: {watts_display} W")
         if scale_missing and expected_count is not None:
             print(f"\nReceived panels: {received_count} / expected {expected_count}")
         else:
