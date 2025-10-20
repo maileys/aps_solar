@@ -19,10 +19,9 @@ TIMEOUT = 5.0
 DEFAULT_CONFIG_FILE = "config.json"
 
 # Regex helpers
+NUM_RE = re.compile(r"(\d+(?:\.\d+)?)")
 WATT_RE = re.compile(r"(\d+)\s*W\b", re.IGNORECASE)
 VOLT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*V\b", re.IGNORECASE)
-TEMP_RE = re.compile(r"(\d+)\s*°?\s*C", re.IGNORECASE)
-
 
 # ======================================
 # Config handling
@@ -38,7 +37,6 @@ def load_config(path: str) -> Dict:
     if "path" not in cfg:
         cfg["path"] = DEFAULT_PATH
     return cfg
-
 
 # ======================================
 # HTML table parser
@@ -79,7 +77,6 @@ class SimpleTableParser(HTMLParser):
         if self._in_td:
             self._current_cell.append(data)
 
-
 # ======================================
 # Core parsing logic
 # ======================================
@@ -89,16 +86,19 @@ def find_inverter_table(tables: List[List[List[str]]]) -> Optional[List[List[str
             return tbl
     return None
 
-
 def extract_first_int(text: str) -> Optional[int]:
-    m = re.search(r"(\d+)", text)
-    return int(m.group(1)) if m else None
-
+    m = WATT_RE.search(text)
+    if m:
+        return int(m.group(1))
+    m2 = re.search(r"(\d+)", text)
+    return int(m2.group(1)) if m2 else None
 
 def extract_first_float(text: str) -> Optional[float]:
-    m = re.search(r"(\d+(?:\.\d+)?)", text)
-    return float(m.group(1)) if m else None
-
+    m = VOLT_RE.search(text)
+    if m:
+        return float(m.group(1))
+    m2 = NUM_RE.search(text)
+    return float(m2.group(1)) if m2 else None
 
 def parse_inverter_data(html: str) -> List[Dict]:
     parser = SimpleTableParser()
@@ -114,15 +114,15 @@ def parse_inverter_data(html: str) -> List[Dict]:
         inv = r[0].strip()
         watts = extract_first_int(r[1])
         volt = extract_first_float(r[3]) if len(r) > 3 else None
-        temp = extract_first_int(r[4]) if len(r) > 4 else None
+        temp = extract_first_float(r[4]) if len(r) > 4 else None
         results.append({"id": inv, "watts": watts, "volt": volt, "temp": temp})
     return results
-
 
 # ======================================
 # PVOutput Publishing
 # ======================================
-def send_to_pvoutput(api_key: str, system_id: str, watts: int, avg_temp: Optional[float], avg_volt: Optional[float]):
+def send_to_pvoutput(api_key: str, system_id: str, watts: int,
+                     avg_temp: Optional[float], avg_volt: Optional[float]) -> str:
     now = datetime.now()
     headers = {
         "X-Pvoutput-Apikey": api_key,
@@ -136,12 +136,35 @@ def send_to_pvoutput(api_key: str, system_id: str, watts: int, avg_temp: Optiona
     if avg_temp is not None:
         data["v5"] = round(avg_temp)
     if avg_volt is not None:
-        data["v6"] = round(avg_volt, 1)
-
-    r = requests.post("https://pvoutput.org/service/r2/addstatus.jsp", headers=headers, data=data, timeout=10)
+        # v6 is typically a single decimal place
+        data["v6"] = f"{avg_volt:.1f}"
+    r = requests.post("https://pvoutput.org/service/r2/addstatus.jsp",
+                      headers=headers, data=data, timeout=10)
     r.raise_for_status()
     return r.text.strip()
 
+# ======================================
+# Helpers
+# ======================================
+def average(values: List[Optional[float]]) -> Optional[float]:
+    nums = [v for v in values if isinstance(v, (int, float))]
+    return (sum(nums) / len(nums)) if nums else None
+
+def scale_total_if_missing(total_raw: int, received_count: int,
+                           expected_count: Optional[int],
+                           scale_missing: bool) -> (int, Optional[int]):
+    """
+    Returns (chosen_total, estimated_total_or_none).
+    If scaling is enabled and we received fewer than expected (but >0),
+    we compute an estimated total and return it as chosen_total, along with the estimate.
+    Otherwise we return the raw total and None.
+    """
+    if (scale_missing and expected_count and
+        isinstance(expected_count, int) and expected_count > 0 and
+        received_count > 0 and expected_count > received_count):
+        estimated = int(round(total_raw * (expected_count / received_count)))
+        return estimated, estimated
+    return total_raw, None
 
 # ======================================
 # Main
@@ -149,19 +172,21 @@ def send_to_pvoutput(api_key: str, system_id: str, watts: int, avg_temp: Optiona
 def build_url(host: str, path: str) -> str:
     return f"{PROTOCOL}://{host}{path}"
 
-
 def fetch_html(url: str) -> str:
     resp = requests.get(url, timeout=TIMEOUT)
     resp.raise_for_status()
     return resp.text
 
-
 def main():
-    parser = argparse.ArgumentParser(description="Read APS inverter data and optionally publish to PVOutput.")
-    parser.add_argument("--config", default=DEFAULT_CONFIG_FILE, help=f"Path to config file (default: {DEFAULT_CONFIG_FILE})")
+    parser = argparse.ArgumentParser(
+        description="Read APS inverter data and optionally publish to PVOutput (with comms-loss scaling)."
+    )
+    parser.add_argument("--config", default=DEFAULT_CONFIG_FILE,
+                        help=f"Path to config file (default: {DEFAULT_CONFIG_FILE})")
     parser.add_argument("--json", action="store_true", help="Output as JSON instead of text.")
     args = parser.parse_args()
 
+    # Load config
     try:
         cfg = load_config(args.config)
     except Exception as e:
@@ -172,6 +197,10 @@ def main():
     pv_cfg = cfg.get("pvoutput", {})
     publish = str(pv_cfg.get("publish", "no")).lower() in ("yes", "true", "1")
 
+    expected_count = cfg.get("expected_count")  # integer panels/inverters expected
+    scale_missing = str(cfg.get("scale_missing", "yes")).lower() in ("yes", "true", "1")
+
+    # Read data
     try:
         html = fetch_html(url)
         readings = parse_inverter_data(html)
@@ -179,45 +208,68 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(2)
 
-    total = sum(r["watts"] or 0 for r in readings)
-    avg_volt = sum(r["volt"] for r in readings if r["volt"]) / len([r for r in readings if r["volt"]]) if any(r["volt"] for r in readings) else None
-    avg_temp = sum(r["temp"] for r in readings if r["temp"]) / len([r for r in readings if r["temp"]]) if any(r["temp"] for r in readings) else None
+    # Compute totals & averages
+    valid_watts = [r["watts"] for r in readings if isinstance(r["watts"], int)]
+    received_count = len(valid_watts)
+    total_raw = sum(valid_watts)
+    avg_volt = average([r["volt"] for r in readings])
+    avg_temp = average([r["temp"] for r in readings])
 
-    result = {
+    # Scale if configured and missing some readings
+    total_scaled, estimated_value = scale_total_if_missing(
+        total_raw=total_raw,
+        received_count=received_count,
+        expected_count=expected_count,
+        scale_missing=scale_missing
+    )
+
+    # Prepare JSON payload for --json or for logging
+    payload = {
         "source": url,
         "timestamp": datetime.now().isoformat(),
-        "total_watts": total,
-        "avg_volt_v": avg_volt,
-        "avg_temp_c": avg_temp,
+        "received_count": received_count,
+        "expected_count": expected_count,
+        "total_watts_raw": total_raw,
+        "total_watts_estimated": estimated_value,  # may be None
+        "total_watts_for_output": total_scaled,
+        "avg_volt_v": round(avg_volt, 1) if isinstance(avg_volt, (int, float)) else None,
+        "avg_temp_c": round(avg_temp, 1) if isinstance(avg_temp, (int, float)) else None,
         "panels": {r["id"]: r["watts"] for r in readings},
+        "scaled_due_to_missing": bool(estimated_value is not None),
     }
 
+    # Output
     if args.json:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(payload, indent=2))
     else:
         print(f"Data source: {url}\n")
         for r in readings:
-            print(f"  {r['id']}: {r['watts']} W")
-        print(f"\nTotal power: {total} W")
+            print(f"  {r['id']}: {r['watts'] if r['watts'] is not None else '—'} W")
+        print(f"\nReceived panels: {received_count}" + (f" / expected {expected_count}" if expected_count else ""))
+        print(f"Raw total power: {total_raw} W")
+        if estimated_value is not None:
+            print(f"Estimated total (scaled for missing panels): {total_scaled} W")
+        else:
+            print(f"Total power: {total_scaled} W")
         if avg_volt is not None:
             print(f"Avg voltage: {avg_volt:.1f} V")
         if avg_temp is not None:
             print(f"Avg temp: {avg_temp:.1f} °C")
 
+    # Publish (uses scaled total if present)
     if publish:
         try:
             api_key = pv_cfg.get("api_key")
             system_id = pv_cfg.get("system_id")
             if not api_key or not system_id:
                 raise KeyError("Missing PVOutput credentials (api_key, system_id).")
-            result_txt = send_to_pvoutput(api_key, system_id, total, avg_temp, avg_volt)
-            print(f"\nPVOutput response: {result_txt}")
+            resp_text = send_to_pvoutput(api_key, system_id, total_scaled, avg_temp, avg_volt)
+            print(f"\nPVOutput response: {resp_text}")
         except Exception as e:
             print(f"Error publishing to PVOutput: {e}", file=sys.stderr)
             sys.exit(4)
     else:
         print("\nPublishing skipped (pvoutput.publish=no).")
-
 
 if __name__ == "__main__":
     main()
