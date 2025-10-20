@@ -261,7 +261,7 @@ def main():
     else:
         print(f"Data source: {url}\n")
         for r in readings:
-            watts_display = r['watts'] if r['watts'] is not None else '—'
+            watts_display = r['watts'] if r['watts'] is not None else 'N/A'
             print(f"  {r['id']}: {watts_display} W")
         if scale_missing and expected_count is not None:
             print(f"\nReceived panels: {received_count} / expected {expected_count}")
