@@ -4,24 +4,39 @@ import json
 import re
 import sys
 from typing import List, Tuple, Dict
+from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
 
 # =======================================
-# Configuration Constants
+# Constants
 # =======================================
 PROTOCOL = "http"
-PATH = "/cgi-bin/parameters"
+DEFAULT_PATH = "/cgi-bin/parameters"
 TIMEOUT = 5  # seconds
+DEFAULT_CONFIG_FILE = "config.json"
 
-# Regex to extract integer watt values like " 2 W" (including &nbsp;)
 WATT_RE = re.compile(r"(\d+)\s*W\b", re.IGNORECASE)
 
 
-def build_url(host: str) -> str:
-    """Build the full URL from protocol, host, and path."""
-    return f"{PROTOCOL}://{host}{PATH}"
+def load_config(path: str) -> Dict[str, str]:
+    """Load host/path settings from a JSON config file."""
+    cfg_path = Path(path)
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    with open(cfg_path, "r") as f:
+        config = json.load(f)
+
+    if "host" not in config:
+        raise KeyError("Config file must contain a 'host' field.")
+    if "path" not in config:
+        config["path"] = DEFAULT_PATH  # apply fallback
+    return config
+
+
+def build_url(host: str, path: str) -> str:
+    return f"{PROTOCOL}://{host}{path}"
 
 
 def fetch_html(url: str) -> str:
@@ -46,7 +61,7 @@ def parse_watts(html: str) -> List[Tuple[str, int]]:
         raise ValueError("Could not find the inverter table with 'Current Power' header")
 
     rows = table.find_all("tr")
-    if not rows or len(rows) < 2:
+    if len(rows) < 2:
         raise ValueError("No data rows found in the inverter table")
 
     results: List[Tuple[str, int]] = []
@@ -57,15 +72,14 @@ def parse_watts(html: str) -> List[Tuple[str, int]]:
         inverter_id = tds[0].get_text(strip=True)
         power_cell = tds[1].get_text(" ", strip=True)
         m = WATT_RE.search(power_cell.replace("\xa0", " "))
-        if not m:
-            continue
-        watts = int(m.group(1))
-        results.append((inverter_id, watts))
+        if m:
+            watts = int(m.group(1))
+            results.append((inverter_id, watts))
     return results
 
 
 def to_json(readings: List[Tuple[str, int]], url: str) -> str:
-    data: Dict[str, object] = {
+    data = {
         "source": url,
         "total_watts": sum(w for _, w in readings),
         "panels": {inv: w for inv, w in readings},
@@ -75,18 +89,32 @@ def to_json(readings: List[Tuple[str, int]], url: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Scrape APS microinverter table and sum panel wattages."
+        description="Scrape APS inverter data using a JSON config file."
     )
-    parser.add_argument("host", help="Host/IP of the APS gateway (e.g., 192.168.1.102)")
+    parser.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG_FILE,
+        help=f"Path to config file containing 'host' (and optional 'path'). Default: {DEFAULT_CONFIG_FILE}",
+    )
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Output results as a single JSON object instead of human-readable text.",
+        help="Output results as JSON instead of human-readable text.",
     )
     args = parser.parse_args()
 
-    url = build_url(args.host)
+    # Load configuration
+    try:
+        cfg = load_config(args.config)
+    except Exception as e:
+        print(f"Error loading config: {e}", file=sys.stderr)
+        sys.exit(1)
 
+    host = cfg["host"]
+    path = cfg["path"]
+    url = build_url(host, path)
+
+    # Fetch and parse
     try:
         html = fetch_html(url)
         readings = parse_watts(html)
@@ -98,11 +126,11 @@ def main():
         print("No inverter watt readings found.", file=sys.stderr)
         sys.exit(3)
 
+    # Output
     if args.json:
         print(to_json(readings, url))
         return
 
-    # Human-readable output
     total = sum(w for _, w in readings)
     print(f"Data source: {url}\n")
     print("Panel readings:")
