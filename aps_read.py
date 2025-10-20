@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+import argparse
+import json
 import re
 import sys
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 import requests
 from bs4 import BeautifulSoup
@@ -62,15 +64,28 @@ def parse_watts(html: str) -> List[Tuple[str, int]]:
     return results
 
 
-def main():
-    # Require host argument
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <host>", file=sys.stderr)
-        print("Example: aps_scrape.py 192.168.1.102", file=sys.stderr)
-        sys.exit(1)
+def to_json(readings: List[Tuple[str, int]], url: str) -> str:
+    data: Dict[str, object] = {
+        "source": url,
+        "total_watts": sum(w for _, w in readings),
+        "panels": {inv: w for inv, w in readings},
+    }
+    return json.dumps(data, separators=(",", ":"))
 
-    host = sys.argv[1]
-    url = build_url(host)
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Scrape APS microinverter table and sum panel wattages."
+    )
+    parser.add_argument("host", help="Host/IP of the APS gateway (e.g., 192.168.1.102)")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output results as a single JSON object instead of human-readable text.",
+    )
+    args = parser.parse_args()
+
+    url = build_url(args.host)
 
     try:
         html = fetch_html(url)
@@ -80,9 +95,14 @@ def main():
         sys.exit(2)
 
     if not readings:
-        print("No inverter watt readings found.")
+        print("No inverter watt readings found.", file=sys.stderr)
         sys.exit(3)
 
+    if args.json:
+        print(to_json(readings, url))
+        return
+
+    # Human-readable output
     total = sum(w for _, w in readings)
     print(f"Data source: {url}\n")
     print("Panel readings:")
