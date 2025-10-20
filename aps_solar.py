@@ -136,8 +136,7 @@ def send_to_pvoutput(api_key: str, system_id: str, watts: int,
     if avg_temp is not None:
         data["v5"] = round(avg_temp)
     if avg_volt is not None:
-        # v6 is typically a single decimal place
-        data["v6"] = f"{avg_volt:.1f}"
+        data["v6"] = f"{avg_volt:.1f}"  # v6 commonly one decimal place
     r = requests.post("https://pvoutput.org/service/r2/addstatus.jsp",
                       headers=headers, data=data, timeout=10)
     r.raise_for_status()
@@ -150,18 +149,17 @@ def average(values: List[Optional[float]]) -> Optional[float]:
     nums = [v for v in values if isinstance(v, (int, float))]
     return (sum(nums) / len(nums)) if nums else None
 
-def scale_total_if_missing(total_raw: int, received_count: int,
+def scale_total_if_missing(total_raw: int,
+                           received_count: int,
                            expected_count: Optional[int],
                            scale_missing: bool) -> (int, Optional[int]):
     """
     Returns (chosen_total, estimated_total_or_none).
     If scaling is enabled and we received fewer than expected (but >0),
-    we compute an estimated total and return it as chosen_total, along with the estimate.
-    Otherwise we return the raw total and None.
+    compute: estimated_total = round(total_raw * expected/received)
     """
-    if (scale_missing and expected_count and
-        isinstance(expected_count, int) and expected_count > 0 and
-        received_count > 0 and expected_count > received_count):
+    if (scale_missing and isinstance(expected_count, int) and expected_count > 0
+            and received_count > 0 and expected_count > received_count):
         estimated = int(round(total_raw * (expected_count / received_count)))
         return estimated, estimated
     return total_raw, None
@@ -197,8 +195,15 @@ def main():
     pv_cfg = cfg.get("pvoutput", {})
     publish = str(pv_cfg.get("publish", "no")).lower() in ("yes", "true", "1")
 
-    expected_count = cfg.get("expected_count")  # integer panels/inverters expected
-    scale_missing = str(cfg.get("scale_missing", "yes")).lower() in ("yes", "true", "1")
+    # Scaling flags:
+    # - scale_missing defaults to "no" when not provided
+    # - expected_count is only required if scale_missing is enabled
+    scale_missing = str(cfg.get("scale_missing", "no")).lower() in ("yes", "true", "1")
+    expected_count = None
+    if scale_missing:
+        expected_count = cfg.get("expected_count")
+        if not isinstance(expected_count, int) or expected_count <= 0:
+            raise ValueError("'expected_count' must be a positive integer when scale_missing is enabled.")
 
     # Read data
     try:
@@ -245,7 +250,10 @@ def main():
         print(f"Data source: {url}\n")
         for r in readings:
             print(f"  {r['id']}: {r['watts'] if r['watts'] is not None else '—'} W")
-        print(f"\nReceived panels: {received_count}" + (f" / expected {expected_count}" if expected_count else ""))
+        if scale_missing and expected_count is not None:
+            print(f"\nReceived panels: {received_count} / expected {expected_count}")
+        else:
+            print(f"\nReceived panels: {received_count}")
         print(f"Raw total power: {total_raw} W")
         if estimated_value is not None:
             print(f"Estimated total (scaled for missing panels): {total_scaled} W")
