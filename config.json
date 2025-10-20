@@ -1,0 +1,11 @@
+{
+  "host": "1.2.3.4",
+  "path": "/cgi-bin/parameters",
+  "pvoutput": {
+    "publish": "yes",
+    "api_key": "YOUR_API_KEY",
+    "system_id": "YOUR_SYSTEM_ID",
+    "send_voltage_v6": true,
+    "send_temp_v5": true
+  }
+}
