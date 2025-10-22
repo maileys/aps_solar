@@ -18,12 +18,12 @@ DEFAULT_PATH = "/cgi-bin/parameters"
 TIMEOUT = 5.0
 DEFAULT_CONFIG_FILE = "config.json"
 
-# Regex helpers (strict, unit-specific, with tolerant temp)
+# Regex helpers (tolerant for temp; numeric fallback)
 WATT_RE = re.compile(r"(-?\d+)\s*W\b", re.IGNORECASE)
 VOLT_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*V\b", re.IGNORECASE)
+FREQ_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*Hz\b", re.IGNORECASE)
 # Accept degree as '°', 'º', HTML '&deg;', or plain 'o' (from <sup>o</sup>)
 TEMP_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*(?:°|º|&deg;|o)?\s*C\b", re.IGNORECASE)
-# Optional numeric fallback
 NUM_RE  = re.compile(r"(-?\d+(?:\.\d+)?)")
 
 # ======================================
@@ -100,6 +100,13 @@ def extract_volts(text: str) -> Optional[float]:
     m2 = NUM_RE.search(text)
     return float(m2.group(1)) if m2 else None
 
+def extract_freq(text: str) -> Optional[float]:
+    m = FREQ_RE.search(text)
+    if m:
+        return float(m.group(1))
+    m2 = NUM_RE.search(text)
+    return float(m2.group(1)) if m2 else None
+
 def extract_temp(text: str) -> Optional[float]:
     m = TEMP_RE.search(text)
     if m:
@@ -118,18 +125,20 @@ def parse_inverter_data(html: str) -> List[Dict]:
     for r in rows:
         if len(r) < 2:
             continue
-        inv = r[0].strip()
+        inv  = r[0].strip()
         watts = extract_watts(r[1])
-        volt = extract_volts(r[3]) if len(r) > 3 else None    # "Grid Voltage"
-        temp = extract_temp(r[4]) if len(r) > 4 else None     # "Temperature"
-        results.append({"id": inv, "watts": watts, "volt": volt, "temp": temp})
+        freq = extract_freq(r[2]) if len(r) > 2 else None      # "Grid Frequency"
+        volt = extract_volts(r[3]) if len(r) > 3 else None      # "Grid Voltage"
+        temp = extract_temp(r[4]) if len(r) > 4 else None       # "Temperature"
+        results.append({"id": inv, "watts": watts, "freq": freq, "volt": volt, "temp": temp})
     return results
 
 # ======================================
 # PVOutput Publishing
 # ======================================
 def send_to_pvoutput(api_key: str, system_id: str, watts: int,
-                     avg_temp: Optional[float], avg_volt: Optional[float]) -> str:
+                     avg_temp: Optional[float], avg_volt: Optional[float],
+                     avg_freq: Optional[float]) -> str:
     now = datetime.now()
     headers = {
         "X-Pvoutput-Apikey": api_key,
@@ -140,11 +149,13 @@ def send_to_pvoutput(api_key: str, system_id: str, watts: int,
         "t": now.strftime("%H:%M"),
         "v2": watts,  # power (W)
     }
-    # v5 = temperature (°C), v6 = voltage (V)
+    # v5 = temperature (°C), v6 = voltage (V), v11 = extended (grid frequency Hz)
     if avg_temp is not None:
         data["v5"] = int(round(avg_temp))
     if avg_volt is not None:
         data["v6"] = f"{avg_volt:.1f}"
+    if avg_freq is not None:
+        data["v11"] = f"{avg_freq:.2f}"
 
     r = requests.post("https://pvoutput.org/service/r2/addstatus.jsp",
                       headers=headers, data=data, timeout=10)
@@ -228,6 +239,7 @@ def main():
     total_raw = sum(valid_watts)
     avg_volt = average([r["volt"] for r in readings])
     avg_temp = average([r["temp"] for r in readings])
+    avg_freq = average([r["freq"] for r in readings])
 
     # Scale if configured and missing some readings
     total_scaled, estimated_value = scale_total_if_missing(
@@ -248,6 +260,7 @@ def main():
         "total_watts_for_output": total_scaled,
         "avg_volt_v": round(avg_volt, 1) if isinstance(avg_volt, (int, float)) else None,
         "avg_temp_c": round(avg_temp, 1) if isinstance(avg_temp, (int, float)) else None,
+        "avg_freq_hz": round(avg_freq, 2) if isinstance(avg_freq, (int, float)) else None,
         "panels": {r["id"]: r["watts"] for r in readings},
         "scaled_due_to_missing": bool(estimated_value is not None),
     }
@@ -273,6 +286,8 @@ def main():
             print(f"Avg voltage: {avg_volt:.1f} V")
         if avg_temp is not None:
             print(f"Avg temp: {avg_temp:.1f} °C")
+        if avg_freq is not None:
+            print(f"Avg frequency: {avg_freq:.2f} Hz")
 
     # Publish (uses scaled total if present)
     if publish:
@@ -281,7 +296,7 @@ def main():
             system_id = pv_cfg.get("system_id")
             if not api_key or not system_id:
                 raise KeyError("Missing PVOutput credentials (api_key, system_id).")
-            resp_text = send_to_pvoutput(api_key, system_id, total_scaled, avg_temp, avg_volt)
+            resp_text = send_to_pvoutput(api_key, system_id, total_scaled, avg_temp, avg_volt, avg_freq)
             print(f"\nPVOutput response: {resp_text}")
         except Exception as e:
             print(f"Error publishing to PVOutput: {e}", file=sys.stderr)
