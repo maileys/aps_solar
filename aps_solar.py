@@ -18,10 +18,13 @@ DEFAULT_PATH = "/cgi-bin/parameters"
 TIMEOUT = 5.0
 DEFAULT_CONFIG_FILE = "config.json"
 
-# Regex helpers (strict, unit-specific)
+# Regex helpers (strict, unit-specific, with tolerant temp)
 WATT_RE = re.compile(r"(-?\d+)\s*W\b", re.IGNORECASE)
 VOLT_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*V\b", re.IGNORECASE)
-TEMP_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*°?\s*C\b", re.IGNORECASE)
+# Accept degree as '°', 'º', HTML '&deg;', or plain 'o' (from <sup>o</sup>)
+TEMP_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*(?:°|º|&deg;|o)?\s*C\b", re.IGNORECASE)
+# Optional numeric fallback
+NUM_RE  = re.compile(r"(-?\d+(?:\.\d+)?)")
 
 # ======================================
 # Config handling
@@ -87,28 +90,22 @@ def find_inverter_table(tables: List[List[List[str]]]) -> Optional[List[List[str
     return None
 
 def extract_watts(text: str) -> Optional[int]:
-    """
-    Extract integer watts from text strictly matching '<num> W'.
-    Returns None if no watt pattern is found.
-    """
     m = WATT_RE.search(text)
     return int(m.group(1)) if m else None
 
 def extract_volts(text: str) -> Optional[float]:
-    """
-    Extract float volts from text strictly matching '<num> V'.
-    Returns None if no volt pattern is found.
-    """
     m = VOLT_RE.search(text)
-    return float(m.group(1)) if m else None
+    if m:
+        return float(m.group(1))
+    m2 = NUM_RE.search(text)
+    return float(m2.group(1)) if m2 else None
 
 def extract_temp(text: str) -> Optional[float]:
-    """
-    Extract float temperature in °C from text strictly matching '<num> °C'.
-    Returns None if no temperature pattern is found.
-    """
     m = TEMP_RE.search(text)
-    return float(m.group(1)) if m else None
+    if m:
+        return float(m.group(1))
+    m2 = NUM_RE.search(text)
+    return float(m2.group(1)) if m2 else None
 
 def parse_inverter_data(html: str) -> List[Dict]:
     parser = SimpleTableParser()
@@ -123,8 +120,8 @@ def parse_inverter_data(html: str) -> List[Dict]:
             continue
         inv = r[0].strip()
         watts = extract_watts(r[1])
-        volt = extract_volts(r[3]) if len(r) > 3 else None
-        temp = extract_temp(r[4]) if len(r) > 4 else None
+        volt = extract_volts(r[3]) if len(r) > 3 else None    # "Grid Voltage"
+        temp = extract_temp(r[4]) if len(r) > 4 else None     # "Temperature"
         results.append({"id": inv, "watts": watts, "volt": volt, "temp": temp})
     return results
 
@@ -141,12 +138,14 @@ def send_to_pvoutput(api_key: str, system_id: str, watts: int,
     data = {
         "d": now.strftime("%Y%m%d"),
         "t": now.strftime("%H:%M"),
-        "v2": watts,
+        "v2": watts,  # power (W)
     }
+    # v5 = temperature (°C), v6 = voltage (V)
     if avg_temp is not None:
-        data["v5"] = round(avg_temp)
+        data["v5"] = int(round(avg_temp))
     if avg_volt is not None:
-        data["v6"] = "{avg_volt, 1}"
+        data["v6"] = f"{avg_volt:.1f}"
+
     r = requests.post("https://pvoutput.org/service/r2/addstatus.jsp",
                       headers=headers, data=data, timeout=10)
     r.raise_for_status()
@@ -208,8 +207,6 @@ def main():
     publish = str(pv_cfg.get("publish", "no")).lower() in ("yes", "true", "1")
 
     # Scaling logic
-    # - scale_missing defaults to "no" when not provided
-    # - expected_count is only required if scale_missing is enabled
     scale_missing = str(cfg.get("scale_missing", "no")).lower() in ("yes", "true", "1")
     expected_count = None
     if scale_missing:
