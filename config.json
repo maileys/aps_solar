@@ -1,13 +1,15 @@
 {
-  "host": "1.2.3.4",
+  "host": "192.168.1.50",
   "path": "/cgi-bin/parameters",
-  "expected_count": 20,
-  "scale_missing": "yes",
   "pvoutput": {
-    "publish": "yes",
-    "api_key": "YOUR_API_KEY",
+    "publish": true,
+    "api_key": "YOUR_PVOUTPUT_KEY",
     "system_id": "YOUR_SYSTEM_ID",
-    "send_voltage_v6": true,
-    "send_temp_v5": true
-  }
+
+    "send_temp": true,
+    "send_voltage": true,
+    "send_freq": true,
+    "send_freq_key": "v11"
+  },
+  "scale_missing": false
 }
