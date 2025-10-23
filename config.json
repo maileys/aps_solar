@@ -5,7 +5,6 @@
     "publish": true,
     "api_key": "YOUR_PVOUTPUT_KEY",
     "system_id": "YOUR_SYSTEM_ID",
-
     "send_temp": true,
     "send_voltage": true,
     "send_freq": true,
