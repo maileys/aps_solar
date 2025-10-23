@@ -28,6 +28,7 @@ If `"pvoutput.publish"` is `true`, it will push results to PVOutput — otherwis
   "host": "192.168.1.102",
   "path": "/cgi-bin/parameters",
   "scale_missing": true,
+  // Only required if scale_missing is true:
   "expected_count": 20,
   "pvoutput": {
     "publish": true,
